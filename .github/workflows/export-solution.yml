@@ -1,0 +1,155 @@
+name: Export solution
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution:
+        description: Solution unique name (not the display name)
+        type: string
+        required: true
+        default: CoreCustomizations
+      environment:
+        description: GitHub environment that points at the DEV environment to export from
+        type: environment
+        required: true
+        default: dev
+      summary:
+        description: One line describing the change; used as commit message and PR title
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+# One export per solution at a time. Two overlapping runs would produce two PRs
+# that both rewrite the same files.
+concurrency:
+  group: export-${{ inputs.solution }}
+  cancel-in-progress: false
+
+jobs:
+  export:
+    name: Export ${{ inputs.solution }} from ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    env:
+      SOLUTION: ${{ inputs.solution }}
+      SOURCE_DIR: solutions/${{ inputs.solution }}/src
+      OUT_DIR: ${{ github.workspace }}/out
+      SUMMARY: ${{ inputs.summary }}
+    steps:
+      - name: Validate solution name
+        shell: bash
+        run: |
+          if [[ ! "$SOLUTION" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]]; then
+            echo "::error::'$SOLUTION' is not a valid solution unique name."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-pac
+        with:
+          environment-url: ${{ vars.PP_ENVIRONMENT_URL }}
+          app-id: ${{ vars.PP_APP_ID }}
+          tenant-id: ${{ vars.PP_TENANT_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+
+      # Unpublished changes are not part of an unmanaged export. Publishing
+      # first avoids the classic "it works in DEV but the form is missing in
+      # TEST" ticket.
+      - name: Publish customizations
+        uses: microsoft/powerplatform-actions/publish-solution@v1
+        with:
+          environment-url: ${{ vars.PP_ENVIRONMENT_URL }}
+          app-id: ${{ vars.PP_APP_ID }}
+          tenant-id: ${{ vars.PP_TENANT_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+
+      # Both flavours are exported so the source can later be packed as either.
+      # SolutionPackager expects the managed zip next to the unmanaged one with
+      # a _managed suffix when unpacking with solution-type Both.
+      - name: Export unmanaged
+        uses: microsoft/powerplatform-actions/export-solution@v1
+        with:
+          environment-url: ${{ vars.PP_ENVIRONMENT_URL }}
+          app-id: ${{ vars.PP_APP_ID }}
+          tenant-id: ${{ vars.PP_TENANT_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          solution-name: ${{ env.SOLUTION }}
+          solution-output-file: ${{ env.OUT_DIR }}/${{ env.SOLUTION }}.zip
+          managed: false
+          run-asynchronously: true
+
+      - name: Export managed
+        uses: microsoft/powerplatform-actions/export-solution@v1
+        with:
+          environment-url: ${{ vars.PP_ENVIRONMENT_URL }}
+          app-id: ${{ vars.PP_APP_ID }}
+          tenant-id: ${{ vars.PP_TENANT_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          solution-name: ${{ env.SOLUTION }}
+          solution-output-file: ${{ env.OUT_DIR }}/${{ env.SOLUTION }}_managed.zip
+          managed: true
+          run-asynchronously: true
+
+      # Unpack into an empty folder. Overwriting in place never deletes files,
+      # so a component removed in DEV would stay in source and come back on the
+      # next deployment.
+      - name: Clear previous source
+        shell: bash
+        run: rm -rf "$SOURCE_DIR" && mkdir -p "$SOURCE_DIR"
+
+      # process-canvas-apps expands .msapp files into readable YAML. Without it
+      # every canvas app change is an opaque binary diff that nobody can review.
+      - name: Unpack
+        uses: microsoft/powerplatform-actions/unpack-solution@v1
+        with:
+          solution-file: ${{ env.OUT_DIR }}/${{ env.SOLUTION }}.zip
+          solution-folder: ${{ env.SOURCE_DIR }}
+          solution-type: Both
+          process-canvas-apps: true
+          overwrite-files: true
+
+      - name: Refresh deployment settings
+        shell: pwsh
+        run: |
+          $target = if (Test-Path "deployment-settings/$env:SOLUTION") { "deployment-settings/$env:SOLUTION" } else { 'deployment-settings' }
+          ./scripts/New-DeploymentSettings.ps1 -SolutionFolder $env:SOURCE_DIR -OutputFolder $target -Verbose
+
+      - name: Open pull request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          ENVIRONMENT_NAME: ${{ inputs.environment }}
+        run: |
+          if [[ -z "$(git status --porcelain -- solutions deployment-settings)" ]]; then
+            echo "::notice::No changes in $SOLUTION since the last export."
+            exit 0
+          fi
+
+          version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$SOURCE_DIR/Other/Solution.xml" | head -n 1)
+          title="${SUMMARY:-Export $SOLUTION $version from $ENVIRONMENT_NAME}"
+          branch="export/${SOLUTION}/${GITHUB_RUN_ID}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -- solutions deployment-settings
+          git commit -m "feat(${SOLUTION}): ${title}" -m "Exported by ${ACTOR} from ${ENVIRONMENT_NAME} (run ${GITHUB_RUN_ID})."
+          git push origin "$branch"
+
+          body=$(cat <<EOF
+          Exported **${SOLUTION}** ${version} from \`${ENVIRONMENT_NAME}\`, requested by @${ACTOR}.
+
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Review new or changed entries in \`deployment-settings/\` before merging; placeholder values fail the release.
+          EOF
+          )
+          gh pr create --base "${GITHUB_REF_NAME}" --head "$branch" --title "$title" --body "$body"

@@ -1,0 +1,86 @@
+name: Build solution
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - solutions/**
+      - deployment-settings/**
+      - .github/workflows/build-solution.yml
+      - .github/workflows/_build.yml
+  push:
+    branches: [main]
+    paths:
+      - solutions/**
+      - deployment-settings/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same PR makes the running build pointless.
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changed solutions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      solutions: ${{ steps.detect.outputs.solutions }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Only rebuild what changed: checker runs take minutes per solution and
+      # count against the tenant's checker quota. Changes to shared settings
+      # or to the pipeline itself rebuild everything.
+      - name: Detect
+        id: detect
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          all=$(find solutions -mindepth 3 -maxdepth 3 -path '*/src/Other' -printf '%h\n' | cut -d/ -f2 | sort -u)
+
+          if [[ "$EVENT" == "workflow_dispatch" || -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            selected="$all"
+          else
+            changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+            if grep -qE '^(deployment-settings/[^/]+\.json|\.github/)' <<< "$changed"; then
+              selected="$all"
+            else
+              selected=$( { grep -oE '^(solutions|deployment-settings)/[^/]+/' <<< "$changed" || true; } | cut -d/ -f2 | sort -u)
+              selected=$(comm -12 <(echo "$all") <(echo "$selected"))
+            fi
+          fi
+
+          json=$(jq -cn --arg s "$selected" '$s | split("\n") | map(select(length > 0))')
+          echo "solutions=$json" >> "$GITHUB_OUTPUT"
+          echo "Solutions to build: $json"
+
+  build:
+    name: Build
+    needs: changes
+    if: needs.changes.outputs.solutions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        solution: ${{ fromJSON(needs.changes.outputs.solutions) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_build.yml
+    with:
+      solution: ${{ matrix.solution }}
+      # Secrets are not available to pull requests from forks, so the checker
+      # cannot authenticate there. Packing still proves the source is valid.
+      run-checker: ${{ github.event.pull_request.head.repo.fork != true }}
+    secrets:
+      PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}

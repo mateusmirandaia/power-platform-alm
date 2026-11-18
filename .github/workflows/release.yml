@@ -1,0 +1,115 @@
+name: Release
+
+# Releases are cut per solution with a tag of the form <Solution>/v<version>,
+# for example CoreCustomizations/v1.4.0, so solutions in this repo can ship
+# independently of each other.
+on:
+  push:
+    tags:
+      - "*/v[0-9]*"
+  workflow_dispatch:
+    inputs:
+      solution:
+        description: Solution unique name
+        type: string
+        required: true
+        default: CoreCustomizations
+      version:
+        description: Version to release (1.4.0 or 1.4.0.2)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      solution: ${{ steps.parse.outputs.solution }}
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - name: Parse tag or inputs
+        id: parse
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_SOLUTION: ${{ inputs.solution }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          # Manual releases are only allowed from main, matching the deployment
+          # branch rules on the test and prod environments.
+          if [[ "$EVENT" == "workflow_dispatch" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Run manual releases from main (got $GITHUB_REF)."
+            exit 1
+          fi
+
+          if [[ "$EVENT" == "push" ]]; then
+            solution="${REF_NAME%%/v*}"
+            version="${REF_NAME#*/v}"
+          else
+            solution="$INPUT_SOLUTION"
+            version="${INPUT_VERSION#v}"
+          fi
+
+          if [[ ! "$solution" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]]; then
+            echo "::error::Invalid solution name '$solution'."
+            exit 1
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Invalid version '$version'. Dataverse expects major.minor.build[.revision]."
+            exit 1
+          fi
+
+          echo "solution=$solution" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $solution $version"
+
+  # Built once. TEST and PROD receive the same artifact, so what was approved in
+  # TEST is exactly what lands in PROD.
+  build:
+    needs: resolve
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_build.yml
+    with:
+      solution: ${{ needs.resolve.outputs.solution }}
+      version: ${{ needs.resolve.outputs.version }}
+      # The same source was already checked when it was built on main; only the
+      # version stamp differs. Skipping it here also means OIDC does not need a
+      # federated credential for every tag name.
+      run-checker: false
+    secrets:
+      PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+
+  test:
+    name: TEST
+    needs: [resolve, build]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      solution: ${{ needs.resolve.outputs.solution }}
+      environment: test
+      artifact-name: ${{ needs.build.outputs.artifact-name }}
+    secrets:
+      PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+
+  prod:
+    name: PROD
+    needs: [resolve, build, test]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      solution: ${{ needs.resolve.outputs.solution }}
+      environment: prod
+      artifact-name: ${{ needs.build.outputs.artifact-name }}
+    secrets:
+      PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
