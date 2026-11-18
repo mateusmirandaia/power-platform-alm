@@ -1,0 +1,14 @@
+<environmentvariabledefinition schemaname="smp_ApiBaseUrl">
+  <defaultvalue>https://api.example.invalid</defaultvalue>
+  <description default="Base URL of the downstream integration API. Overridden per environment through deployment settings.">
+    <label description="Base URL of the downstream integration API. Overridden per environment through deployment settings." languagecode="1033" />
+  </description>
+  <displayname default="API Base URL">
+    <label description="API Base URL" languagecode="1033" />
+  </displayname>
+  <introducedversion>1.0.0.0</introducedversion>
+  <iscustomizable>1</iscustomizable>
+  <isrequired>0</isrequired>
+  <secretstore>0</secretstore>
+  <type>100000000</type>
+</environmentvariabledefinition>

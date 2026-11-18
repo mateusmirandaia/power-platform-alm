@@ -1,0 +1,15 @@
+{
+  "EnvironmentVariables": [
+    {
+      "SchemaName": "smp_ApiBaseUrl",
+      "Value": "https://integration.yourorg.example.com"
+    }
+  ],
+  "ConnectionReferences": [
+    {
+      "LogicalName": "smp_sharedcommondataserviceforapps_core",
+      "ConnectionId": "00000000-0000-0000-0000-000000000000",
+      "ConnectorId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps"
+    }
+  ]
+}
