@@ -51,10 +51,27 @@ jobs:
             exit 1
           fi
 
+      # Pull requests opened with the default GITHUB_TOKEN do not trigger other
+      # workflows, so the build and checker would not run on the export PR.
+      # A GitHub App token avoids that. Without one the PR is still created and
+      # the build has to be started by pushing to the branch or re-opening it.
+      - name: Create GitHub App token
+        id: app-token
+        if: vars.ALM_BOT_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ vars.ALM_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.ALM_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - uses: ./.github/actions/setup-pac
         with:
+          pac-version: ${{ vars.PP_PAC_VERSION }}
           environment-url: ${{ vars.PP_ENVIRONMENT_URL }}
           app-id: ${{ vars.PP_APP_ID }}
           tenant-id: ${{ vars.PP_TENANT_ID }}
@@ -105,15 +122,15 @@ jobs:
         shell: bash
         run: rm -rf "$SOURCE_DIR" && mkdir -p "$SOURCE_DIR"
 
-      # process-canvas-apps expands .msapp files into readable YAML. Without it
-      # every canvas app change is an opaque binary diff that nobody can review.
+      # process-canvas-apps is deliberately not used. pac deprecated it and newer
+      # releases removed it, so source unpacked with it cannot be packed again
+      # once the CLI is upgraded. Canvas apps stay as .msapp files here.
       - name: Unpack
         uses: microsoft/powerplatform-actions/unpack-solution@v1
         with:
           solution-file: ${{ env.OUT_DIR }}/${{ env.SOLUTION }}.zip
           solution-folder: ${{ env.SOURCE_DIR }}
           solution-type: Both
-          process-canvas-apps: true
           overwrite-files: true
 
       - name: Refresh deployment settings
@@ -125,7 +142,7 @@ jobs:
       - name: Open pull request
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           ACTOR: ${{ github.actor }}
           ENVIRONMENT_NAME: ${{ inputs.environment }}
         run: |

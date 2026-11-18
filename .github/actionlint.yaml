@@ -1,0 +1,7 @@
+# actionlint ships a snapshot of popular actions' inputs. create-github-app-token
+# added `client-id` (and made `app-id` optional) after that snapshot was taken.
+paths:
+  .github/workflows/export-solution.yml:
+    ignore:
+      - 'missing input "app-id" which is required by action "actions/create-github-app-token@v3'
+      - 'input "client-id" is not defined in action "actions/create-github-app-token@v3'

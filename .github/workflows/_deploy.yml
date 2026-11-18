@@ -81,6 +81,7 @@ jobs:
 
       - uses: ./.github/actions/setup-pac
         with:
+          pac-version: ${{ vars.PP_PAC_VERSION }}
           environment-url: ${{ vars.PP_ENVIRONMENT_URL }}
           app-id: ${{ vars.PP_APP_ID }}
           tenant-id: ${{ vars.PP_TENANT_ID }}

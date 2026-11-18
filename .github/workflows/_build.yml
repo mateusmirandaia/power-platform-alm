@@ -63,6 +63,8 @@ jobs:
           fi
 
       - uses: ./.github/actions/setup-pac
+        with:
+          pac-version: ${{ vars.PP_PAC_VERSION }}
 
       - name: Stamp version
         id: version
@@ -85,15 +87,12 @@ jobs:
 
       # Managed is what goes downstream. The unmanaged package is kept in the
       # artifact so a broken DEV can be rebuilt from exactly the same commit.
-      # process-canvas-apps must match the setting used when unpacking,
-      # otherwise the .msapp files are missing from the package.
       - name: Pack managed
         uses: microsoft/powerplatform-actions/pack-solution@v1
         with:
           solution-folder: ${{ env.SOURCE_DIR }}
           solution-file: ${{ env.OUT_DIR }}/${{ env.SOLUTION }}_managed.zip
           solution-type: Managed
-          process-canvas-apps: true
 
       - name: Pack unmanaged
         uses: microsoft/powerplatform-actions/pack-solution@v1
@@ -101,7 +100,6 @@ jobs:
           solution-folder: ${{ env.SOURCE_DIR }}
           solution-file: ${{ env.OUT_DIR }}/${{ env.SOLUTION }}.zip
           solution-type: Unmanaged
-          process-canvas-apps: true
 
       # The checker action fails the job on any High or Critical finding. Rules
       # that are accepted noise for this repo can be downgraded in

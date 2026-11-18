@@ -16,6 +16,12 @@ inputs:
     description: Microsoft Entra tenant ID.
     required: false
     default: ""
+  pac-version:
+    description: >-
+      Power Platform CLI version to install. Empty uses the version bundled with
+      powerplatform-actions, which changes whenever the action is updated.
+    required: false
+    default: ""
   client-secret:
     description: >-
       Client secret. Leave empty to authenticate with GitHub OIDC (workload
@@ -30,6 +36,7 @@ runs:
       uses: microsoft/powerplatform-actions/actions-install@v1
       with:
         add-tools-to-path: true
+        pac-version-override: ${{ inputs.pac-version }}
 
     # Every powerplatform-actions step authenticates on its own. Doing one cheap
     # WhoAmI first means a wrong app ID, a missing application user or an
