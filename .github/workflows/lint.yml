@@ -1,0 +1,97 @@
+name: Lint
+
+on:
+  pull_request:
+    paths:
+      - .github/**
+      - scripts/**
+      - deployment-settings/**
+      - .yamllint.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/**
+      - scripts/**
+      - deployment-settings/**
+      - .yamllint.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACTIONLINT_VERSION: 1.7.12
+
+jobs:
+  workflows:
+    name: actionlint and yamllint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: actionlint
+        shell: bash
+        run: |
+          bash <(curl -sSfL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
+          ./actionlint -color
+
+      - name: yamllint
+        shell: bash
+        run: |
+          pipx run yamllint --strict .github .yamllint.yml
+
+  powershell:
+    name: PSScriptAnalyzer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Analyze scripts
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $results = Invoke-ScriptAnalyzer -Path ./scripts -Recurse -Severity Warning, Error
+          $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Output
+          foreach ($r in $results) {
+            Write-Output "::warning file=$($r.ScriptPath),line=$($r.Line)::$($r.RuleName): $($r.Message)"
+          }
+          if ($results | Where-Object Severity -eq 'Error') { exit 1 }
+
+  settings:
+    name: Deployment settings JSON
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Catches the broken-comma kind of mistake before a release reaches the
+      # approval gate. Whether the values are complete is checked at deploy time
+      # against the actual solution.
+      - name: Validate JSON shape
+        shell: bash
+        run: |
+          status=0
+          while IFS= read -r -d '' file; do
+            if ! jq -e '
+                (.EnvironmentVariables | type == "array") and
+                (.ConnectionReferences | type == "array") and
+                all(.EnvironmentVariables[]; has("SchemaName") and has("Value")) and
+                all(.ConnectionReferences[]; has("LogicalName") and has("ConnectionId") and has("ConnectorId"))
+              ' "$file" > /dev/null; then
+              echo "::error file=$file::Not a valid deployment settings file."
+              status=1
+            fi
+          done < <(find deployment-settings -name '*.json' -print0)
+          exit $status
