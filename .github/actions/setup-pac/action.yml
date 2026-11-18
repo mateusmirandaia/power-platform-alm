@@ -1,0 +1,49 @@
+name: Set up Power Platform CLI
+description: >-
+  Installs pac, puts it on PATH and, when an environment URL is given, checks
+  that the service principal can actually reach that environment.
+
+inputs:
+  environment-url:
+    description: Environment to verify the connection against. Leave empty to only install pac.
+    required: false
+    default: ""
+  app-id:
+    description: Application (client) ID of the service principal.
+    required: false
+    default: ""
+  tenant-id:
+    description: Microsoft Entra tenant ID.
+    required: false
+    default: ""
+  client-secret:
+    description: >-
+      Client secret. Leave empty to authenticate with GitHub OIDC (workload
+      identity federation); the calling job then needs `id-token: write`.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install pac
+      uses: microsoft/powerplatform-actions/actions-install@v1
+      with:
+        add-tools-to-path: true
+
+    # Every powerplatform-actions step authenticates on its own. Doing one cheap
+    # WhoAmI first means a wrong app ID, a missing application user or an
+    # expired secret fails here with a clear message instead of twenty minutes
+    # into an export or an import.
+    - name: Verify connection
+      if: inputs.environment-url != ''
+      uses: microsoft/powerplatform-actions/who-am-i@v1
+      with:
+        environment-url: ${{ inputs.environment-url }}
+        app-id: ${{ inputs.app-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        client-secret: ${{ inputs.client-secret }}
+
+    - name: Show pac version
+      shell: bash
+      run: pac help | sed -n '1,2p'

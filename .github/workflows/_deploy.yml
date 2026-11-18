@@ -1,0 +1,117 @@
+name: Deploy solution (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      solution:
+        description: Solution unique name.
+        type: string
+        required: true
+      environment:
+        description: GitHub environment to deploy to (test, prod, ...). Holds the target URL and approval rules.
+        type: string
+        required: true
+      artifact-name:
+        description: Build artifact produced by _build.yml.
+        type: string
+        required: true
+    secrets:
+      PP_CLIENT_SECRET:
+        description: Only needed when not using OIDC.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Import into ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Required reviewers, wait timers and branch/tag restrictions are configured
+    # on the GitHub environment, not here, so they cannot be bypassed by editing
+    # this file in a pull request.
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ vars.PP_ENVIRONMENT_URL }}
+    # Two imports of the same solution into the same environment will fight over
+    # the solution lock and one of them fails halfway. Queue instead, and never
+    # cancel an import that has already started.
+    concurrency:
+      group: deploy-${{ inputs.environment }}-${{ inputs.solution }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SOLUTION: ${{ inputs.solution }}
+      TARGET_ENV: ${{ inputs.environment }}
+      ARTIFACT: ${{ inputs.artifact-name }}
+      DROP_DIR: ${{ github.workspace }}/drop
+    steps:
+      - name: Check environment configuration
+        shell: bash
+        env:
+          ENVIRONMENT_URL: ${{ vars.PP_ENVIRONMENT_URL }}
+          APP_ID: ${{ vars.PP_APP_ID }}
+          TENANT_ID: ${{ vars.PP_TENANT_ID }}
+        run: |
+          missing=0
+          for name in ENVIRONMENT_URL APP_ID TENANT_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::PP_${name} is not set for the '$TARGET_ENV' environment."
+              missing=1
+            fi
+          done
+          exit $missing
+
+      # Only scripts/ is needed; the solution itself comes from the artifact so
+      # what gets imported is byte-for-byte what was built and checked.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            .github/actions
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ env.DROP_DIR }}
+
+      - uses: ./.github/actions/setup-pac
+        with:
+          environment-url: ${{ vars.PP_ENVIRONMENT_URL }}
+          app-id: ${{ vars.PP_APP_ID }}
+          tenant-id: ${{ vars.PP_TENANT_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+
+      - name: Validate deployment settings
+        shell: pwsh
+        run: |
+          ./scripts/Test-DeploymentSettings.ps1 `
+            -SettingsFile "$env:DROP_DIR/deployment-settings/$env:TARGET_ENV.json" `
+            -SolutionZip "$env:DROP_DIR/${env:SOLUTION}_managed.zip"
+
+      # stage-and-upgrade applies the upgrade in a single step. A plain import
+      # of a newer version only adds and updates components; anything removed
+      # from the solution in DEV would stay behind in TEST/PROD forever.
+      - name: Import managed solution
+        uses: microsoft/powerplatform-actions/import-solution@v1
+        with:
+          environment-url: ${{ vars.PP_ENVIRONMENT_URL }}
+          app-id: ${{ vars.PP_APP_ID }}
+          tenant-id: ${{ vars.PP_TENANT_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          solution-file: ${{ env.DROP_DIR }}/${{ env.SOLUTION }}_managed.zip
+          use-deployment-settings-file: true
+          deployment-settings-file: ${{ env.DROP_DIR }}/deployment-settings/${{ inputs.environment }}.json
+          stage-and-upgrade: true
+          activate-plugins: true
+          run-asynchronously: true
+          max-async-wait-time: 60
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "Imported \`$ARTIFACT\` into **$TARGET_ENV**." >> "$GITHUB_STEP_SUMMARY"

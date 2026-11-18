@@ -1,0 +1,155 @@
+name: Build solution (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      solution:
+        description: Solution unique name; must match a folder under solutions/.
+        type: string
+        required: true
+      version:
+        description: >-
+          Version to stamp (1.4.0 or 1.4.0.7). When empty, the version committed
+          in Solution.xml is kept and only the revision is set to the run number.
+        type: string
+        required: false
+        default: ""
+      run-checker:
+        description: Run solution checker against the managed package.
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      PP_CLIENT_SECRET:
+        description: Only needed when not using OIDC.
+        required: false
+    outputs:
+      artifact-name:
+        description: Name of the uploaded build artifact.
+        value: ${{ jobs.build.outputs.artifact-name }}
+      version:
+        description: Solution version that was packed.
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Pack ${{ inputs.solution }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SOLUTION: ${{ inputs.solution }}
+      SOURCE_DIR: solutions/${{ inputs.solution }}/src
+      OUT_DIR: ${{ github.workspace }}/out
+    outputs:
+      artifact-name: ${{ steps.meta.outputs.artifact-name }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check solution folder
+        shell: bash
+        run: |
+          if [[ ! -f "$SOURCE_DIR/Other/Solution.xml" ]]; then
+            echo "::error::$SOURCE_DIR/Other/Solution.xml not found. Is '$SOLUTION' the solution unique name?"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/setup-pac
+
+      - name: Stamp version
+        id: version
+        shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:REQUESTED_VERSION) {
+            ./scripts/Set-SolutionVersion.ps1 -SolutionFolder $env:SOURCE_DIR -Version $env:REQUESTED_VERSION -Verbose
+          } else {
+            ./scripts/Set-SolutionVersion.ps1 -SolutionFolder $env:SOURCE_DIR -Revision $env:GITHUB_RUN_NUMBER -Verbose
+          }
+
+      - name: Artifact metadata
+        id: meta
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: echo "artifact-name=solution-${SOLUTION}-${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # Managed is what goes downstream. The unmanaged package is kept in the
+      # artifact so a broken DEV can be rebuilt from exactly the same commit.
+      # process-canvas-apps must match the setting used when unpacking,
+      # otherwise the .msapp files are missing from the package.
+      - name: Pack managed
+        uses: microsoft/powerplatform-actions/pack-solution@v1
+        with:
+          solution-folder: ${{ env.SOURCE_DIR }}
+          solution-file: ${{ env.OUT_DIR }}/${{ env.SOLUTION }}_managed.zip
+          solution-type: Managed
+          process-canvas-apps: true
+
+      - name: Pack unmanaged
+        uses: microsoft/powerplatform-actions/pack-solution@v1
+        with:
+          solution-folder: ${{ env.SOURCE_DIR }}
+          solution-file: ${{ env.OUT_DIR }}/${{ env.SOLUTION }}.zip
+          solution-type: Unmanaged
+          process-canvas-apps: true
+
+      # The checker action fails the job on any High or Critical finding. Rules
+      # that are accepted noise for this repo can be downgraded in
+      # .github/solution-checker/rule-overrides.json, with a reason in the PR.
+      - name: Solution checker
+        if: inputs.run-checker
+        uses: microsoft/powerplatform-actions/check-solution@v1
+        with:
+          path: ${{ env.OUT_DIR }}/${{ env.SOLUTION }}_managed.zip
+          environment-url: ${{ vars.PP_CHECKER_ENVIRONMENT_URL }}
+          app-id: ${{ vars.PP_APP_ID }}
+          tenant-id: ${{ vars.PP_TENANT_ID }}
+          client-secret: ${{ secrets.PP_CLIENT_SECRET }}
+          geo: ${{ vars.PP_CHECKER_GEO || 'UnitedStates' }}
+          rule-level-override: ${{ hashFiles('.github/solution-checker/rule-overrides.json') != '' && '.github/solution-checker/rule-overrides.json' || '' }}
+          checker-logs-artifact-name: checker-${{ env.SOLUTION }}
+
+      # Settings are bundled with the build so a release deploys the settings
+      # from the tagged commit, not whatever is on main when PROD is approved.
+      - name: Collect deployment settings
+        shell: bash
+        run: |
+          settings_dir="deployment-settings/$SOLUTION"
+          [[ -d "$settings_dir" ]] || settings_dir="deployment-settings"
+          mkdir -p "$OUT_DIR/deployment-settings"
+          cp "$settings_dir"/*.json "$OUT_DIR/deployment-settings/"
+          echo "Bundled settings from $settings_dir"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact-name }}
+          path: ${{ env.OUT_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARTIFACT: ${{ steps.meta.outputs.artifact-name }}
+        run: |
+          {
+            echo "### $SOLUTION $VERSION"
+            echo ""
+            echo "| File | Size |"
+            echo "|------|------|"
+            find "$OUT_DIR" -type f -printf '| %P | %s bytes |\n' | sort
+            echo ""
+            echo "Artifact: \`$ARTIFACT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
